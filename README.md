@@ -4,7 +4,7 @@
 
 Clone the repository:
 ```bash
-git clone https://github.com/LHDuan/ConDaFormer.git
+git clone https://github.com/Buanma/CPFormer.git
 ```
 Create a conda virtual environment and install the corresponding dependencies according to [Point Transformer V2](https://github.com/Pointcept/PointTransformerV2/) (we test on python=3.8.15, pytorch==1.10.1, cuda==11.1, spconv-cu113==2.3.3).
 
