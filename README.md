@@ -1,5 +1,7 @@
 # CPFormer: Contrast Planes Transformer for Point Cloud Semantic Segmentation
 
+![CPFormer](imgs\cpformer.jpg)
+
 ## Installation
 
 Clone the repository:
