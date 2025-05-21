@@ -84,10 +84,10 @@ class Window_Attention(nn.Module):
                  qk_scale=None, qkv_bias=True, rel_query=True, rel_key=True, rel_value=True, indice_key=""
     ):   
         super().__init__()
-        self.embed_dim = embed_dim  #输入特征维度
-        self.num_heads = num_heads  #注意力头数量
-        self.shift_win = shift_win  #是否进行窗口位移
-        head_dim = embed_dim // num_heads   #进入的维度//(进入维度//16) ,每个头的维度一直是16
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.shift_win = shift_win
+        head_dim = embed_dim // num_heads
         self.head_dim = head_dim
         self.scale = qk_scale or head_dim ** -0.5
         self.window_size = to_3d_numpy(window_size)
@@ -98,12 +98,9 @@ class Window_Attention(nn.Module):
         assert int((window_size[0] + 1e-4)/ quant_size[0]) == int((window_size[1] + 1e-4)/ quant_size[1])
         assert self.rel_query and self.rel_key and self.rel_value
 
-        #编码三维空间中点之间的相对位置
         if self.rel_query:
             self.q_table = nn.Parameter(torch.zeros(2*self.quant_grid_length-1, 3, self.num_heads//3, self.head_dim))
-            # 初始化三个表为[15,3,(dim//16//3),16]。[位置编码长度，三个坐标轴(三个平面)，每个面的头数，每个头的维度]
             trunc_normal_(self.q_table, std=.02)
-            #初始化三个表位截断正态分布
         if self.rel_key:
             self.k_table = nn.Parameter(torch.zeros(2*self.quant_grid_length-1, 3, self.num_heads//3, self.head_dim))
             trunc_normal_(self.k_table, std=.02)
@@ -111,12 +108,11 @@ class Window_Attention(nn.Module):
             self.v_table = nn.Parameter(torch.zeros(2*self.quant_grid_length-1, 3, self.num_heads//3, self.head_dim))
             trunc_normal_(self.v_table, std=.02)
 
-        self.qkv = nn.Linear(embed_dim, embed_dim * 3, bias=qkv_bias)#用于生成qkv
+        self.qkv = nn.Linear(embed_dim, embed_dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(dropout, inplace=True)
         self.proj = nn.Linear(embed_dim, embed_dim)
         self.proj_drop = nn.Dropout(dropout, inplace=True)
 
-        #LSE模块
         self.conv_1 = spconv.SparseSequential(
                 spconv.SubMConv3d(embed_dim, embed_dim//2, kernel_size=1, padding=1, groups=1, bias=False, indice_key=indice_key),
                 nn.BatchNorm1d(embed_dim//2, eps=1e-5, momentum=0.1),
@@ -139,15 +135,14 @@ class Window_Attention(nn.Module):
                 nn.Linear(embed_dim, embed_dim//2),
                 nn.BatchNorm1d(embed_dim//2, eps=1e-5, momentum=0.1),
             )
-    #基于量化三维位置的点之间的相对位置索引
-    def get_relative_position_index(self, window_size, xyz_ctg, index_0, index_1):
 
+    def get_relative_position_index(self, window_size, xyz_ctg, index_0, index_1):
         window_size = torch.from_numpy(window_size).float().cuda()
         shift_size = 1/2 * window_size if self.shift_win else 0.0
         xyz_quant = (xyz_ctg - xyz_ctg.min(0)[0] + shift_size) % window_size
         xyz_quant = torch.div(xyz_quant, torch.from_numpy(self.quant_size).float().cuda(), rounding_mode='floor') #[N, 3]
         relative_position = xyz_quant[index_0.long()] - xyz_quant[index_1.long()] #[M, 3]
-        relative_position_index = relative_position + self.quant_grid_length - 1
+        relative_position_index = relative_position + self.quant_grid_length - 1       
         relative_position_index = relative_position_index.int()
         return relative_position_index
 
@@ -182,12 +177,12 @@ class Window_Attention(nn.Module):
     def forward_qkv(self, query, key, value, xyz, batch):
         q_table, k_table, v_table = self.q_table, self.k_table, self.v_table
 
-        window_size_xy = self.window_size.copy()
-        window_size_xy[2] = 1   #仅使用xy平面
+        window_size_xy = self.window_size.copy() 
+        window_size_xy[2] = 1
         window_size_xz = self.window_size.copy() 
-        window_size_xz[1] = 1   #仅使用xz平面
+        window_size_xz[1] = 1
         window_size_yz = self.window_size.copy() 
-        window_size_yz[0] = 1   #仅使用yz平面
+        window_size_yz[0] = 1
         s_h_m = self.num_heads // 3 # split_head_num
         out_xy = self.strip_attention(xyz, batch, window_size_xy, 
                                         query[:, :s_h_m], key[:, :s_h_m], value[:, :s_h_m], 
@@ -201,16 +196,13 @@ class Window_Attention(nn.Module):
         return [out_xy, out_xz, out_yz]
 
     def forward_qkv_one_pass(self, query, key, value, xyz, batch):
-        q_table, k_table, v_table = self.q_table, self.k_table, self.v_table    #相对位置的qkv
+        q_table, k_table, v_table = self.q_table, self.k_table, self.v_table
         window_size_xy = self.window_size.copy() 
-        window_size_xy[2] = 1   #仅使用xy平面
+        window_size_xy[2] = 1
         window_size_xz = self.window_size.copy() 
-        window_size_xz[1] = 1   #仅使用xz平面
+        window_size_xz[1] = 1
         window_size_yz = self.window_size.copy() 
-        window_size_yz[0] = 1   #仅使用yz平面
-
-        window_size_cubic = self.window_size.copy() // 2
-
+        window_size_yz[0] = 1
         index_0_xy, index_0_offsets_xy, n_max_xy, index_1_xy, index_1_offsets_xy, sort_idx_xy = get_indices_params(
             xyz, 
             batch, 
@@ -230,57 +222,32 @@ class Window_Attention(nn.Module):
             window_size_yz, 
             self.shift_win
         )
-        index_0_cubic, index_0_offsets_cubic, n_max_cubic, index_1_cubic, index_1_offsets_cubic, sort_idx_cubic = get_indices_params(
-            xyz,
-            batch,
-            window_size_cubic,
-            self.shift_win
-        )
-        #给每个窗口计算索引和偏移量
 
-        s_h_m = self.num_heads // 3 #将头分给三个平面，每个平面几个头 dim//heads_dim(16) // 3】
-        s_h_m = self.num_heads // 4 #将头分给三个平面以及一个cubic，每个部分几个头 dim//heads_dim(16) // 4】
-        #根据sort_idx对qkv排序，将其划分为4部分，对应三个平面的qkv
-        # query_xy, key_xy, value_xy = query[:, :s_h_m][sort_idx_xy], key[:, :s_h_m][sort_idx_xy], value[:, :s_h_m][sort_idx_xy]
-        # query_xz, key_xz, value_xz = query[:, s_h_m:2*s_h_m][sort_idx_xz], key[:, s_h_m:2*s_h_m][sort_idx_xz], value[:, s_h_m:2*s_h_m][sort_idx_xz]
-        # query_yz, key_yz, value_yz = query[:, 2*s_h_m:][sort_idx_yz], key[:, 2*s_h_m:][sort_idx_yz], value[:, 2*s_h_m:][sort_idx_yz]
-
+        s_h_m = self.num_heads // 3
         query_xy, key_xy, value_xy = query[:, :s_h_m][sort_idx_xy], key[:, :s_h_m][sort_idx_xy], value[:, :s_h_m][sort_idx_xy]
         query_xz, key_xz, value_xz = query[:, s_h_m:2*s_h_m][sort_idx_xz], key[:, s_h_m:2*s_h_m][sort_idx_xz], value[:, s_h_m:2*s_h_m][sort_idx_xz]
-        query_yz, key_yz, value_yz = query[:, 2*s_h_m:3*s_h_m][sort_idx_yz], key[:, 2*s_h_m:3*s_h_m][sort_idx_yz], value[:, 2*s_h_m:3*s_h_m][sort_idx_yz]
-        query_cubic, key_cubic, value_cubic = query[:, 3*s_h_m:4*s_h_m][sort_idx_cubic], key[:, 3*s_h_m:4*s_h_m][sort_idx_cubic], value[:, 3*s_h_m:4*s_h_m][sort_idx_cubic]
+        query_yz, key_yz, value_yz = query[:, 2*s_h_m:][sort_idx_yz], key[:, 2*s_h_m:][sort_idx_yz], value[:, 2*s_h_m:][sort_idx_yz]
 
-
-        #根据sort_idx对坐标分组，将其划分为3部分，对应三个平面点的坐标
-        xyz_xy, xyz_xz, xyz_yz, xyz_cubic = xyz[sort_idx_xy], xyz[sort_idx_xz], xyz[sort_idx_yz], xyz[sort_idx_cubic]
-
-        #计算每个平面中qk之间的相对位置，增强点之间的空间关系
+        xyz_xy, xyz_xz, xyz_yz = xyz[sort_idx_xy], xyz[sort_idx_xz], xyz[sort_idx_yz]
+        
         relative_position_index_xy = self.get_relative_position_index(window_size_xy, xyz_xy, index_0_xy, index_1_xy)
         relative_position_index_xz = self.get_relative_position_index(window_size_xz, xyz_xz, index_0_xz, index_1_xz)
         relative_position_index_yz = self.get_relative_position_index(window_size_yz, xyz_yz, index_0_yz, index_1_yz)
-        relative_position_index_cubic = self.get_relative_position_index(window_size_cubic, xyz_cubic, index_0_cubic, index_1_cubic)
 
-        # 三个平面的全局qkv
         query_xyz = torch.cat([query_xy, query_xz, query_yz], dim=1)
         key_xyz = torch.cat([key_xy, key_xz, key_yz], dim=1)
         value_xyz = torch.cat([value_xy, value_xz, value_yz], dim=1)
 
-        # 三个平面的索引
         index_0_xyz = torch.cat([index_0_xy, index_0_xz, index_0_yz], dim=0)
         index_1_xyz = torch.cat([index_1_xy, index_1_xz, index_1_yz], dim=0)
 
-        # 三个平面的偏移量
         index_0_offsets_xyz = torch.cat([index_0_offsets_xy, index_0_offsets_xz, index_0_offsets_yz], dim=0)
         index_1_offsets_xyz = torch.cat([index_1_offsets_xy, index_1_offsets_xz, index_1_offsets_yz], dim=0)
 
-        # 三个平面的相对位置索引
         relative_position_index_xyz = torch.cat([relative_position_index_xy, relative_position_index_xz, relative_position_index_yz], dim=0)
         m_offsets = torch.cuda.IntTensor([index_0_xy.shape[0], index_0_xz.shape[0], index_0_yz.shape[0]]).cumsum(-1).int().cuda()
 
-        #最大点数为三个平面中的最大点数
-        n_max = max(max(max(n_max_xy, n_max_xz), n_max_yz), n_max_cubic)
-
-        #计算三个平面的注意力
+        n_max = max(max(n_max_xy, n_max_xz), n_max_yz)
         out = tri_plane_self_attention(
                 query_xyz.contiguous().float(), key_xyz.contiguous().float(), value_xyz.contiguous().float(), 
                 index_0_xyz.int(), index_0_offsets_xyz.int(),
@@ -290,23 +257,21 @@ class Window_Attention(nn.Module):
                 m_offsets,
                 q_table.contiguous().float(), k_table.contiguous().float(), v_table.contiguous().float()
         )
-
-        #重新排序得到每个平面的输出
         out_xy, out_xz, out_yz = torch.empty_like(out[:, :s_h_m]), torch.empty_like(out[:, s_h_m:2*s_h_m]), torch.empty_like(out[:, 2*s_h_m:])
         out_xy[sort_idx_xy] = out[:, :s_h_m]
         out_xz[sort_idx_xz] = out[:, s_h_m:2*s_h_m]
         out_yz[sort_idx_yz] = out[:, 2*s_h_m:]
-        return [out_xy, out_xz, out_yz] #获取每个平面的计算结果
+        return [out_xy, out_xz, out_yz]
 
-    def get_qkv_from_inp(self, inp):#根据输入进行LSE以及获取qkv
+    def get_qkv_from_inp(self, inp):
         N, C = inp.features.shape
-        inp = inp.replace_feature(torch.cat([self.conv_1(inp).features, self.conv_3(inp).features], dim=1))#注意力之前应用LSE
-        qkv = self.qkv(inp.features).reshape(N, 3, self.num_heads, C // self.num_heads).permute(1, 0, 2, 3).contiguous()#用于生成qkv
+        inp = inp.replace_feature(torch.cat([self.conv_1(inp).features, self.conv_3(inp).features], dim=1))
+        qkv = self.qkv(inp.features).reshape(N, 3, self.num_heads, C // self.num_heads).permute(1, 0, 2, 3).contiguous()
         query, key, value = qkv[0], qkv[1], qkv[2] #[N, num_heads, C//num_heads]
-        query = query * self.scale  #稳定训练，进行查询的缩放
+        query = query * self.scale
         return query, key, value
 
-    def get_feat_from_attn(self, inp, x):#进行post_LSE
+    def get_feat_from_attn(self, inp, x):
         N, C = inp.features.shape
         x = torch.cat(x, dim=1)
         x = x.view(N, C).contiguous()
@@ -316,9 +281,9 @@ class Window_Attention(nn.Module):
 
     def forward(self, inp, xyz, batch):
         assert xyz.shape[1] == 3
-        query, key, value = self.get_qkv_from_inp(inp) #进行LSE以及qkv的生成
+        query, key, value = self.get_qkv_from_inp(inp) 
         x = self.forward_qkv_one_pass(query, key, value, xyz, batch)
-        x = self.get_feat_from_attn(inp, x) #进行post_LSE
+        x = self.get_feat_from_attn(inp, x)
         x = self.proj(x)
         x = self.proj_drop(x) #[N, C]
         return inp.replace_feature(x)
@@ -329,7 +294,7 @@ class BasicBlock_Attention(nn.Module):
                  mlp_ratio=4.0, act_layer=nn.GELU, norm_layer=nn.LayerNorm, indice_key=""
     ):
         super().__init__()
-        self.window_size = window_size #配置文件中为8
+        self.window_size = window_size
         num_heads = dim // head_dim
         self.norm1 = norm_layer(dim)
         self.attn = Window_Attention(
